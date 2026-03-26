@@ -1,0 +1,93 @@
+﻿package main
+
+import (
+    "net/http"
+    "os"
+
+    "github.com/gorilla/mux"
+    "github.com/ybotet/pz6_csrf_xss/services/tasks/internal/clients"
+    "github.com/ybotet/pz6_csrf_xss/services/tasks/internal/handlers"
+    "github.com/ybotet/pz6_csrf_xss/services/tasks/internal/repository"
+
+    internalMiddleware "github.com/ybotet/pz6_csrf_xss/services/tasks/internal/middleware"
+    "github.com/ybotet/pz6_csrf_xss/shared/logger"
+    "github.com/ybotet/pz6_csrf_xss/shared/middleware"
+)
+
+func main() {
+    tasksPort := os.Getenv("TASKS_PORT")
+    if tasksPort == "" {
+        tasksPort = "8082"
+    }
+
+    authAddr := os.Getenv("AUTH_GRPC_ADDR")
+    if authAddr == "" {
+        authAddr = "localhost:50051"
+    }
+
+    log := logger.New(logger.Config{
+        ServiceName: "tasks",
+        Environment: "development",
+        LogLevel:    "debug",
+        JSONFormat:  true,
+    })
+    
+    // Conectar a PostgreSQL
+    db, err := repository.NewPostgresConnection()
+    if err != nil {
+        log.Fatalf("Error conectando a PostgreSQL: %v", err)
+    }
+    defer db.Close()
+    
+    // Crear repositorio
+    taskRepo := repository.NewPostgresTaskRepository(db)
+    
+    // Ejecutar migración (simple)
+    _, err = db.Exec(
+        CREATE TABLE IF NOT EXISTS tasks (
+            id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            title TEXT NOT NULL,
+            description TEXT,
+            done BOOLEAN DEFAULT FALSE,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    )
+    if err != nil {
+        log.Fatalf("Error creando tabla: %v", err)
+    }
+    
+    // Router
+    r := mux.NewRouter()
+    
+    // Middleware
+    r.Use(middleware.RequestID)
+    r.Use(middleware.Logging(log))
+
+    // Conectar a Auth service
+    authClient, err := clients.NewAuthClient(authAddr)
+    if err != nil {
+        log.Fatalf("Error conectando a Auth service: %v", err)
+    }
+    defer authClient.Close()
+
+    // Middleware de autenticación
+    authMiddleware := internalMiddleware.NewAuthMiddleware(authClient.GetClient())
+    taskHandler := handlers.NewTaskHandler(taskRepo)
+
+    // Rutas
+    r.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+        w.WriteHeader(http.StatusOK)
+        w.Write([]byte("OK"))
+    }).Methods("GET")
+    
+    // Endpoints normales
+    r.HandleFunc("/v1/tasks", authMiddleware.Authenticate(taskHandler.GetTasks)).Methods("GET")
+    r.HandleFunc("/v1/tasks", authMiddleware.Authenticate(taskHandler.CreateTask)).Methods("POST")
+    
+    // Endpoints para demostrar SQL injection
+    r.HandleFunc("/v1/tasks/search/vulnerable", authMiddleware.Authenticate(taskHandler.SearchTasksVulnerable)).Methods("GET")
+    r.HandleFunc("/v1/tasks/search", authMiddleware.Authenticate(taskHandler.SearchTasks)).Methods("GET")
+
+    log.Printf("Servidor Tasks escuchando en puerto %s", tasksPort)
+    log.Fatal(http.ListenAndServe(":"+tasksPort, r))
+}

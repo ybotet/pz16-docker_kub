@@ -1,0 +1,6 @@
+﻿.git
+.vscode
+README.md
+*.log
+deploy/
+**/*.md
