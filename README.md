@@ -108,9 +108,13 @@ coverage.txt
 ### 6.1. Полный файл docker-compose.yml
 
 **Путь:** `deploy/docker-compose.yml`
+
 ![alt text](<public/Снимок экрана 2026-03-27 010311.png>)
+
 ![alt text](<public/Снимок экрана 2026-03-27 010321.png>)
+
 ![alt text](<public/Снимок экрана 2026-03-27 010327.png>)
+
 ![alt text](<public/Снимок экрана 2026-03-27 010337.png>)
 
 ## 6.2. Descripción de servicios
