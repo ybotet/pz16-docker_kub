@@ -43,13 +43,6 @@ jobs:
       - name: Verify shared package compiles
         run: go build -o /dev/null ./shared/...
 
-      - name: Verify proto/gen compiles (if any)
-        run: |
-          if [ -d "./gen" ]; then
-            go build -o /dev/null ./gen/...
-          fi
-        continue-on-error: true
-
   # ========== JOB 2: DOCKER BUILD Y PUBLISH (CD) ==========
   docker-build-push:
     needs: verify-build
@@ -86,7 +79,7 @@ jobs:
       - name: Build and push auth image
         uses: docker/build-push-action@v5
         with:
-          context: ./services/auth
+          context: .
           file: ./services/auth/Dockerfile
           push: true
           tags: ${{ steps.meta_auth.outputs.tags }}
@@ -108,7 +101,7 @@ jobs:
       - name: Build and push tasks image
         uses: docker/build-push-action@v5
         with:
-          context: ./services/tasks
+          context: .
           file: ./services/tasks/Dockerfile
           push: true
           tags: ${{ steps.meta_tasks.outputs.tags }}
