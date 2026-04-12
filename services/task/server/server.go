@@ -72,6 +72,7 @@ func (s *RESTServer) setupRoutes() *mux.Router {
 	api.HandleFunc("/tasks", s.handler.CreateTask).Methods("POST")
 	api.HandleFunc("/tasks/{id}", s.handler.UpdateTask).Methods("PATCH")
 	api.HandleFunc("/tasks/{id}", s.handler.DeleteTask).Methods("DELETE")
+	api.HandleFunc("/jobs/process-task", s.handler.CreateJob).Methods("POST")
 
 	r.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")

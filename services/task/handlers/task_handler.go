@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"time"
 
@@ -239,4 +240,101 @@ func (h *TaskHandler) DeleteTask(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	json.NewEncoder(w).Encode(map[string]bool{"deleted": true})
+}
+
+// services/task/handlers/task_handler.go
+// Añadir al final del archivo (después de DeleteTask)
+
+// CreateJobRequest para el endpoint de jobs
+type CreateJobRequest struct {
+	TaskID string `json:"task_id"`
+}
+
+// CreateJob POST /v1/jobs/process-task
+func (h *TaskHandler) CreateJob(w http.ResponseWriter, r *http.Request) {
+	h.logger.WithField("path", r.URL.Path).Info("REST request: create job")
+
+	var req CreateJobRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		h.logger.WithError(err).Warn("Invalid request body")
+		http.Error(w, `{"error":"invalid request body"}`, http.StatusBadRequest)
+		return
+	}
+
+	if req.TaskID == "" {
+		http.Error(w, `{"error":"task_id is required"}`, http.StatusBadRequest)
+		return
+	}
+
+	// MODO PRUEBA: Si task_id es "dlq_test", saltar verificación
+	if req.TaskID != "dlq_test" && !contains(req.TaskID, "fail") {
+		// Verificar que la tarea existe (solo para IDs normales)
+		_, err := h.repo.GetByID(r.Context(), req.TaskID)
+		if err != nil {
+			h.logger.WithError(err).WithField("task_id", req.TaskID).Warn("Task not found")
+			http.Error(w, `{"error":"task not found"}`, http.StatusNotFound)
+			return
+		}
+	} else {
+		h.logger.WithField("task_id", req.TaskID).Info("Test mode: skipping task existence check")
+	}
+
+	// Publicar job
+	job := models.TaskJob{
+		Job:       "process_task",
+		TaskID:    req.TaskID,
+		Attempt:   1,
+		MessageID: uuid.New().String(),
+		CreatedAt: time.Now().UTC(),
+	}
+
+	if err := h.publishJob(job); err != nil {
+		h.logger.WithError(err).Error("Failed to publish job")
+		http.Error(w, `{"error":"failed to publish job"}`, http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusAccepted)
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"status":     "accepted",
+		"message_id": job.MessageID,
+		"task_id":    job.TaskID,
+	})
+}
+
+// publishJob publica un job en la cola task_jobs
+func (h *TaskHandler) publishJob(job models.TaskJob) error {
+	if h.rabbit == nil {
+		return fmt.Errorf("rabbit client not available")
+	}
+
+	body, err := json.Marshal(job)
+	if err != nil {
+		return err
+	}
+
+	client, ok := h.rabbit.(*rabbit.RabbitClient)
+	if !ok {
+		return fmt.Errorf("invalid rabbit client type")
+	}
+
+	// Usar queue name para jobs (diferente de events)
+	jobQueueName := "task_jobs"
+	return client.PublishJSON(jobQueueName, body)
+}
+
+func contains(s, substr string) bool {
+    if len(substr) == 0 {
+        return true
+    }
+    if len(s) < len(substr) {
+        return false
+    }
+    for i := 0; i <= len(s)-len(substr); i++ {
+        if s[i:i+len(substr)] == substr {
+            return true
+        }
+    }
+    return false
 }
