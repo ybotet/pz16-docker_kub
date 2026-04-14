@@ -1,0 +1,13 @@
+.git
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+tasks
+bin/
+deploy/
+docs/
+*.md

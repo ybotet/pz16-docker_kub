@@ -1,275 +1,209 @@
-# Практическое занятие №15: Деплой приложения на VPS. Настройка systemd
+# Практическое занятие №16: Публикация приложения в Kubernetes
 
-## Описание
+## Цель работы
 
-Цель данной практической работы — научиться публиковать сервис на удалённой машине (VPS) и управлять им через systemd. В рамках работы сервис `tasks` разворачивается в среде Linux (WSL2), настраивается как systemd-сервис с автоматическим запуском и перезапуском, а также подключается к необходимым зависимостям (PostgreSQL, Redis, RabbitMQ).
+Цель данной практической работы — научиться контейнеризировать приложение и разворачивать его в Kubernetes с использованием минимальных манифестов (Deployment, Service, ConfigMap).
 
 ---
 
 ## Структура проекта
 
-![alt text](<public/Снимок экрана 2026-04-12 235207.png>)
+![alt text](<public/Снимок экрана 2026-04-14 032937.png>)
 
----
+## Используемый Kubernetes стенд
 
-## Инфраструктура
+Для выполнения работы использовался **Kind (Kubernetes in Docker)** — инструмент для запуска локального кластера Kubernetes внутри Docker-контейнеров.
 
-### Среда выполнения
-
-В качестве "VPS" используется WSL2 (Windows Subsystem for Linux) с Ubuntu 22.04. Это обеспечивает полноценную среду Linux с поддержкой systemd.
-
-**Проверка окружения:**
+**Создание кластера:**
 ```bash
-hostname -I
-# 172.20.240.123
+kind create cluster --name tasks-cluster --config deploy/k8s/kind-config.yaml
 ```
 
-## Установленные компоненты
-
-| Компонент | Версия | Назначение |
-|---|---:|---|
-| Ubuntu | 22.04 | Операционная система |
-| systemd | 249 | Системный менеджер |
-| PostgreSQL | 14.22 | База данных |
-| Redis | 7.0.8 | Кэш/хранилище |
-| RabbitMQ | 3.9.13 | Брокер сообщений |
-| Go binary | - | Сервис `tasks` |
-
-## Структура директорий
-
-```bash
-/opt/tasks/
-├── bin/
-│   └── tasks              # Бинарный файл сервиса
-└── (рабочая директория)
-
-/etc/tasks/
-└── tasks.env              # Переменные окружения
-
-/etc/systemd/system/
-└── tasks.service          # systemd unit-файл
-
+**Конфигурация кластера (kind-config.yaml):**
+```yaml
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+nodes:
+- role: control-plane
+- role: worker
+- role: worker
 ```
 
-###
+**Проверка доступа:**
 ```bash
-# Создание директорий
-sudo mkdir -p /opt/tasks/bin
-sudo mkdir -p /etc/tasks
+kubectl cluster-info --context kind-tasks-cluster
+kubectl get nodes
+``` 
 
-# Создание пользователя для сервиса
-sudo useradd --system --no-create-home --shell /usr/sbin/nologin tasksuser
+![alt text](<public/Снимок экрана 2026-04-14 031120.png>)
 
-# Установка прав
-sudo chown -R tasksuser:tasksuser /opt/tasks
+## Подготовка Docker-образа
+
+### Dockerfile
+
+```dockerfile
+FROM golang:1.25-alpine AS builder
+
+WORKDIR /app
+
+COPY . .
+
+RUN go mod download
+RUN CGO_ENABLED=0 GOOS=linux go build -o tasks ./services/task/cmd/task
+
+FROM alpine:latest
+
+RUN apk --no-cache add ca-certificates
+
+WORKDIR /root/
+
+COPY --from=builder /app/tasks .
+
+EXPOSE 8082
+
+CMD ["./tasks"]
 ```
 
-## Переменные окружения
-
-Файл `/etc/tasks/tasks.env` содержит конфигурацию сервиса:
+### Сборка образа
 
 ```bash
-# Сервер
-REST_PORT=8082
-
-# PostgreSQL
-DB_HOST=localhost
-DB_PORT=5432
-DB_USER=tasksuser
-DB_PASSWORD=taskspass
-DB_NAME=tasksdb
-
-# Redis
-REDIS_ADDR=localhost:6379
-
-# RabbitMQ
-RABBIT_URL=amqp://guest:guest@localhost:5672/
-QUEUE_NAME=task_events
-
-# Логирование
-LOG_LEVEL=info
+docker build -t techip-tasks:0.1 .
 ```
 
-### Права доступа
+### Загрузка образа в Kind
 
 ```bash
-sudo chmod 600 /etc/tasks/tasks.env   # Только для чтения root
-sudo chown root:root /etc/tasks/tasks.env
+kind load docker-image techip-tasks:0.1 --name tasks-cluster
 ```
 
-## Systemd Unit-файл
+![alt text](<public/Снимок экрана 2026-04-14 031713.png>)
 
-Файл `/etc/systemd/system/tasks.service`:
+## Манифесты Kubernetes
 
-```ini
-[Unit]
-Description=Tasks Service (REST + GraphQL)
-After=network.target postgresql.service redis-server.service rabbitmq-server.service
-Wants=postgresql.service redis-server.service rabbitmq-server.service
+### ConfigMap (`configmap.yaml`)
 
-[Service]
-Type=simple
-User=tasksuser
-Group=tasksuser
-WorkingDirectory=/opt/tasks
-EnvironmentFile=/etc/tasks/tasks.env
-ExecStart=/opt/tasks/bin/tasks
-Restart=always
-RestartSec=5
-NoNewPrivileges=true
-LimitNOFILE=65535
-
-[Install]
-WantedBy=multi-user.target
+```yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: tasks-config
+data:
+  REST_PORT: "8082"
+  LOG_LEVEL: "info"
+  DB_HOST: "postgres"
+  DB_PORT: "5432"
+  DB_USER: "tasksuser"
+  DB_PASSWORD: "taskspass"
+  DB_NAME: "tasksdb"
+  REDIS_ADDR: "redis:6379"
+  RABBIT_URL: "amqp://guest:guest@rabbitmq:5672/"
+  QUEUE_NAME: "task_events"
 ```
 
-### Объяснение ключевых параметров
+### Deployment (`deployment.yaml`)
 
-| Параметр | Значение | Описание |
-|---|---|---|
-| `After=` | `network.target postgresql.service ...` | Сервис запускается после указанных зависимостей. |
-| `Wants=` | `postgresql.service ...` | Мягкая зависимость: systemd попробует запустить эти сервисы. |
-| `User=` | `tasksuser` | Запуск от непривилегированного пользователя для безопасности. |
-| `EnvironmentFile=` | `/etc/tasks/tasks.env` | Загрузка переменных окружения из файла. |
-| `Restart=` | `always` | Автоматический перезапуск при падении. |
-| `RestartSec=` | `5` | Пауза 5 секунд перед перезапуском. |
-| `NoNewPrivileges=` | `true` | Запрещает повышение привилегий. |
-| `LimitNOFILE=` | `65535` | Максимум открытых файловых дескрипторов. |
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: tasks
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: tasks
+  template:
+    metadata:
+      labels:
+        app: tasks
+    spec:
+      containers:
+      - name: tasks
+        image: techip-tasks:0.1
+        imagePullPolicy: IfNotPresent
+        ports:
+        - containerPort: 8082
+        envFrom:
+        - configMapRef:
+            name: tasks-config
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8082
+          initialDelaySeconds: 5
+          periodSeconds: 10
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8082
+          initialDelaySeconds: 15
+          periodSeconds: 20
+```
 
-## Управление сервисом
+### Service (`service.yaml`)
 
-### Основные команды
+```yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: tasks
+spec:
+  selector:
+    app: tasks
+  ports:
+  - port: 8082
+    targetPort: 8082
+  type: ClusterIP
+```
+
+### Деплой зависимостей
+
+Были созданы отдельные манифесты для каждого сервиса с `Deployment` и `Service`.
+
+## Применение манифестов
 
 ```bash
-# Перезагрузка конфигурации systemd
-sudo systemctl daemon-reload
-
-# Запуск сервиса
-sudo systemctl start tasks
-
-# Остановка сервиса
-sudo systemctl stop tasks
-
-# Перезапуск сервиса
-sudo systemctl restart tasks
-
-# Проверка статуса
-sudo systemctl status tasks
-
-# Включение автозапуска при загрузке системы
-sudo systemctl enable tasks
-
-# Отключение автозапуска
-sudo systemctl disable tasks
+kubectl apply -f deploy/k8s/configmap.yaml
+kubectl apply -f deploy/k8s/postgres.yaml
+kubectl apply -f deploy/k8s/redis.yaml
+kubectl apply -f deploy/k8s/rabbitmq.yaml
+kubectl apply -f deploy/k8s/deployment.yaml
+kubectl apply -f deploy/k8s/service.yaml
 ```
 
-### Статус сервиса
+## Проверка состояния
 
-```bash
-sudo systemctl status tasks
-```
+![alt text](<public/Снимок экрана 2026-04-14 032341.png>)
 
-![alt text](<public/Снимок экрана 2026-04-13 030535.png>)
+![alt text](<public/Снимок экрана 2026-04-14 024954.png>)
 
-## Логирование (journalctl)
-### Просмотр логов
+![alt text](<public/Снимок экрана 2026-04-14 024914.png>) 
 
-![alt text](<public/Снимок экрана 2026-04-13 030808.png>)
-
-## Проверка работоспособности
-### Health check
-
-![alt text](<public/Снимок экрана 2026-04-13 031038.png>) 
-
-![alt text](<public/Снимок экрана 2026-04-13 031111.png>) 
-
-![alt text](<public/Снимок экрана 2026-04-13 031119.png>)
-
-## Обновление сервиса
-```bash
-# 1. Остановить сервис
-sudo systemctl stop tasks
-
-# 2. Сделать резервную копию текущего бинарника
-sudo cp /opt/tasks/bin/tasks /opt/tasks/bin/tasks.backup
-
-# 3. Скопировать новую версию
-sudo cp /tmp/tasks /opt/tasks/bin/tasks
-
-# 4. Установить права
-sudo chmod 755 /opt/tasks/bin/tasks
-sudo chown tasksuser:tasksuser /opt/tasks/bin/tasks
-
-# 5. Запустить сервис
-sudo systemctl start tasks
-
-# 6. Проверить статус
-sudo systemctl status tasks
-```
-
-## База данных PostgreSQL
-
-### Создание таблицы
-
-```sql
-CREATE TABLE IF NOT EXISTS tasks (
-    id VARCHAR(36) PRIMARY KEY,
-    title VARCHAR(255) NOT NULL,
-    description TEXT,
-    done BOOLEAN DEFAULT FALSE,
-    created_at TIMESTAMP,
-    updated_at TIMESTAMP
-);
-```
-
-### Права доступа
-
-```sql
-GRANT ALL PRIVILEGES ON TABLE tasks TO tasksuser;
-GRANT ALL PRIVILEGES ON SCHEMA public TO tasksuser;
-```
+![alt text](<public/Снимок экрана 2026-04-14 024908.png>) 
 
 
-## Контрольные вопросы
+## Ответы на контрольные вопросы
 
-1. Зачем нужен systemd и чем он лучше "запуска в screen/tmux"?
+1. Чем Pod отличается от Deployment?
 
-systemd — это системный менеджер (PID 1), который управляет сервисами на уровне ОС. В отличие от screen/tmux:
+Pod — это минимальная единица в Kubernetes, содержащая один или несколько контейнеров. Deployment — это контроллер, который управляет Pod'ами: обеспечивает нужное количество реплик, выполняет обновления и откаты.
 
-- Автоматический перезапуск при падении (Restart=always)
-- Автозапуск при загрузке системы (systemctl enable)
-- Централизованные логи (journalctl)
-- Управление зависимостями (After=, Wants=)
-- Безопасность (запуск от непривилегированного пользователя)
+2. Зачем нужен Service и почему нельзя "ходить прямо в Pod"?
 
-2. Почему не стоит запускать сервис от root?
+Pod'ы в Kubernetes эфемерны — они могут создаваться, удаляться и менять IP-адреса. Service предоставляет стабильный IP-адрес и DNS-имя, а также балансирует нагрузку между несколькими Pod'ами.
 
-По соображениям безопасности. Если сервис скомпрометирован, злоумышленник получит полный контроль над системой. Запуск от выделенного пользователя (tasksuser) ограничивает потенциальный ущерб.
+3. Чем readiness probe отличается от liveness probe?
 
-3. Зачем хранить env-конфиг в /etc/, а не в репозитории?
+- Readiness probe проверяет, готов ли Pod принимать трафик. Если проверка не проходит, Pod исключается из Service.
+- Liveness probe проверяет, жив ли контейнер. Если проверка не проходит, Kubernetes перезапускает контейнер.
 
-- Разделение кода и конфигурации (12-factor app)
-- Защита секретов (пароли, токены) — они не попадают в репозиторий
-- Возможность изменять конфигурацию без перекомпиляции
-- Разные конфигурации для разных сред (dev/staging/prod)
+4. Зачем нужен ConfigMap и чем он отличается от Secret?
 
-4. Как посмотреть логи сервиса, если он упал?
+ConfigMap хранит несекретные данные конфигурации (переменные окружения, параметры). Secret хранит чувствительные данные (пароли, токены, ключи) в закодированном виде (base64).
 
-```bash
+5. Почему важно использовать теги образов, а не только latest?
 
-# Последние 50 строк логов
-sudo journalctl -u tasks -n 50 --no-pager
-
-# Логи с момента последнего запуска
-sudo journalctl -u tasks --since "5 minutes ago"
-
-# Логи в реальном времени
-sudo journalctl -u tasks -f
-```
-
-5. Что даёт Restart=always и RestartSec?
-
-- Restart=always — systemd автоматически перезапускает сервис, если процесс завершился (упал)
-- RestartSec=5 — задержка в 5 секунд перед попыткой перезапуска, предотвращая бесконечный цикл быстрых перезапусков#   p z 1 6 - d o c k e r _ k u b  
- #   p z 1 6 - d o c k e r _ k u b  
- 
+- latest не даёт информации о версии
+- Сложно выполнить откат (rollback) к предыдущей версии
+- Трудно понять, какая версия реально работает
+- Теги позволяют точно идентифицировать версию (например, 0.1, v1.2.3 или хеш коммита)
